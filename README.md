@@ -30,3 +30,24 @@ Pair-wise GSB 标注任务仓库（第 11 批 / 114）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+## 实现说明
+
+结构化并发框架位于 `com.example.gsb.sc` 包，核心类型：
+
+- `TaskScope`：try-with-resources 作用域，`fork(...)` 提交子任务，`join()` 等待全部结束并按提交顺序返回结果；作用域退出时保证取消并结束/放弃所有子任务。
+- `ScopeConfig`：可分别配置作用域整体超时（`scopeTimeout`）、单任务默认超时（`subtaskTimeout`，也可在 `fork` 时单独覆盖，先到者生效）、中断宽限期（`interruptGracePeriod`）和失败策略（`ShutdownPolicy.AWAIT_ALL` / `SHUTDOWN_ON_FAILURE`）。
+- `ScopeFailedException`：聚合异常，`failures()` 按提交顺序返回 `SubtaskFailure(index, name, FailureKind, cause)`；`businessFailures()` 与 `cancellations()` 可区分业务失败与取消；作用域整体超时抛其子类 `ScopeTimeoutException`。
+- 子任务不响应中断时，宽限期过后被标记为 `SubtaskState.UNRESPONSIVE`，框架放弃等待（工作线程为 daemon，不会阻止 JVM 退出），`join()` 不会无限阻塞。
+
+```java
+try (TaskScope scope = TaskScope.open(
+        ScopeConfig.builder()
+                .scopeTimeout(Duration.ofSeconds(2))
+                .subtaskTimeout(Duration.ofSeconds(1))
+                .build())) {
+    SubtaskHandle<Foo> a = scope.fork("a", serviceA::call);
+    SubtaskHandle<Bar> b = scope.fork("b", serviceB::call);
+    List<Object> results = scope.join(); // 按提交顺序
+}
+```
