@@ -30,3 +30,48 @@ Pair-wise GSB 标注任务仓库（第 11 批 / 114）。
 1. 在本仓库中完成提示词要求的全部内容。
 2. `./mvnw -q verify` 必须通过。
 3. 完成后在所属分支（A 或 B）上提交，产物快照的父提交必须是初始环境快照。
+
+---
+
+## 实现说明（分支 A）
+
+源码位于 `src/main/java/com/example/gsb/sc/`：
+
+| 类 | 职责 |
+|----|------|
+| `TaskScope` | 结构化并发作用域：提交子任务、`join()` 等待全部结束、`cancel()` 取消、`close()` 保证退出时无遗留等待 |
+| `Subtask` | 子任务句柄：接收取消信号（中断）、记录原始结果 |
+| `TaskResult` / `TaskState` | 单任务结果：`SUCCESS / FAILED / CANCELLED / TIMEOUT / UNRESPONSIVE` |
+| `ScopeResult` | 按提交顺序排列的全量结果报告，可按下标/名称定位失败 |
+| `AggregateTaskException` | 聚合异常，包含全部失败（区分业务失败与被取消） |
+| `TaskTimeoutException` / `UnresponsiveTaskException` | 子任务超时、不响应中断的标记异常 |
+
+### 用法示例
+
+```java
+try (TaskScope scope = TaskScope.builder()
+        .scopeTimeout(Duration.ofSeconds(2))      // 作用域整体超时
+        .taskTimeout(Duration.ofMillis(500))      // 默认单任务超时
+        .abandonGrace(Duration.ofMillis(300))     // 不响应中断时的放弃等待宽限
+        .build()) {
+    scope.submit("user", () -> loadUser(id));
+    scope.submit("orders", Duration.ofMillis(800), () -> loadOrders(id)); // 单独超时
+    ScopeResult result = scope.join();            // 任一失败 -> 取消其余并抛 AggregateTaskException
+    return result.values();                       // 按提交顺序
+}
+```
+
+### 语义要点
+
+- **取消传播**：任一子任务业务失败/超时，或作用域被取消/整体超时，所有未完成子任务立即收到中断信号。
+- **先到先生效**：单任务超时与作用域整体超时独立计时，谁先触发谁生效。
+- **不响应中断**：超时后等待一个放弃宽限（abandon grace），仍不停止则标记 `UNRESPONSIVE` 并放弃等待，绝不无限阻塞（工作线程为守护线程，不会拖住 JVM 退出）。
+- **异常聚合**：`AggregateTaskException#failures()` 含全部失败，`TaskResult#state()` 区分 `FAILED`（业务）与 `CANCELLED`/`TIMEOUT`/`UNRESPONSIVE`。
+
+### 测试
+
+`src/test/java/com/example/gsb/sc/TaskScopeTest.java` 覆盖：全部成功按序返回、部分失败聚合+fail-fast 取消、作用域超时取消全部、单任务超时、不响应中断标记放弃、未 join 直接 close 的取消回收、外部 cancel、重复提交拒绝等 10 个用例。
+
+```bash
+./mvnw -q verify   # 或 mvn -q verify
+```
